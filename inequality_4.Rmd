@@ -1,0 +1,807 @@
+---
+title: "inequality_4"
+author: "Zhongyun Zhang"
+date: "2023-06-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+library(tableone)
+library(tidyverse)
+library(MatchIt)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+library("viridis")
+#install.packages("gtools", repos="https://cran.rstudio.com/")
+library(gtools)
+install.packages("RColorBrewer")
+library(RColorBrewer)
+library(gridExtra)
+
+```
+
+## Data Processing
+
+* Outcomes: vent hours, hospital days, icu days
+* Controlling variables: age, CCI score, SOFA score, Surgery type (cabg, valve)
+* Varaibles: race (black and white), gender
+
+
+```{r}
+#import data
+eicu <- read.csv("~/Desktop/301/PPC/data/hf_eicu.csv",row.names = 1, header = TRUE)
+mimic <- read.csv("~/Desktop/301/PPC/data/hf_mimic.csv", row.names = 1, header = TRUE)
+#View(eicu)
+```
+
+```{r}
+eicu_500 <- subset(eicu, eicu$numbedscategory==">= 500")
+eicu_250499 <- subset(eicu, eicu$numbedscategory=="250 - 499")
+eicu_100249 <- subset(eicu, eicu$numbedscategory=="100 - 249")
+#table(eicu_500$ethnicity)
+#table(eicu_250499$ethnicity)
+#table(eicu_100249$ethnicity)
+#selecting eicu number of beds>250 
+eicu <- subset(eicu,eicu$numbedscategory==">= 500" | eicu$numbedscategory=="250 - 499")
+#table(eicu$ethnicity)
+#table(mimic$ethnicity)
+```
+
+```{r}
+## fill na for MV hours
+eicu[is.na(eicu)] <- 0
+mimic[is.na(mimic)] <- 0
+# Remove rows with one patient with 300 in 'age' - mimic
+mimic <- mimic[mimic$age != "300", ]
+
+#select variables
+vars <- c('admission_type', 'gender', 'age', 'charlson_comorbidity_index', 'ethnicity', 'cabg', 'valve_surgery', 'sofa', 'vent_hour', 'los_hospital_day', 'los_icu_day','bmi')
+eicu <- eicu %>% select(all_of(vars))
+mimic <- mimic %>% select(all_of(vars))
+# combine eicu and mimic
+total <- rbind(eicu, mimic) %>%
+  filter(ethnicity %in% c('black', 'white'))
+#hist(total$ethnicity,total$age)
+total <- total[total$vent_hour >= 0,]
+table(total$ethnicity)
+```
+
+```{r}
+# Assuming your dataset is named 'data' and 'gender' and 'ethnicity' are existing columns
+total$combined <- ifelse(total$gender == "M" & total$ethnicity == "white", "White male",
+                 ifelse(total$gender == "F" & total$ethnicity == "white", "White female",
+                 ifelse(total$gender == "M" & total$ethnicity == "black", "Black male",
+                 ifelse(total$gender == "F" & total$ethnicity == "black", "Black female",NA))))
+# Convert 'combined' column to numeric representation
+total$combined <- factor(total$combined, levels = c("White male", "White female", "Black male", "Black female"), labels = c(1, 2, 3, 4))
+levels(total$combined) <- c("White male", "White female", "Black male", "Black female")
+table(total$combined)
+
+
+#total$age_c <-  ifelse(total$age < 40, "<40",
+#                 ifelse(total$age >= 40 & total$age < 50, "40-50",
+#                 ifelse(total$age >= 50 & total$age < 60, "50-60",
+#                 ifelse(total$age >= 60 & total$age < 70, "60-70",               
+#                 ifelse(total$age >= 70 & total$age < 80, "70-80",
+#                 ifelse(total$age >= 80 & total$age < 90, "80-90",">=90"))))))
+
+#total$sofa <- as.factor(total$sofa)
+#total$charlson_comorbidity_index <- as.factor(total$charlson_comorbidity_index)
+#total$sofa_c <- factor(ifelse(total$sofa > 6, 1, 0))
+#total$charlson_comorbidity_index_c <- factor(ifelse(total$charlson_comorbidity_index > 4, 1, 0))
+
+                 
+  # vent hour -> mv > 24, mv <= 24
+total$mv24 <- factor(ifelse(total$vent_hour > 24, 1, 0))
+total$hos_day3 <- factor(ifelse(total$los_hospital_day > 3, 1, 0))
+total$icu_day3 <- factor(ifelse(total$los_icu_day > 3, 1, 0))
+```
+
+
+#### MV hours 24
+
+```{r}
+res1 <- glm(mv24 ~ combined+admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res1 <- summary(res1)
+#sum_res1
+```
+
+```{r}
+invfisher.logit <- vcov(res1)
+CI.logit = res1$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))), t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f 
+```
+
+the probability for ventilation over 24 hour for white female, black male, black female would be 1.29, 2.05,2.38 times higher compared to white male respectively, with adjusted confounders age, admission type, charlson comorbidity index, cabg, valve surgery and sofa score.
+
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res1, newdata = total, type = "response")
+lower_ci <- predict(res1, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res1, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res1, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res1, type = "response", se.fit = TRUE)$se.fit
+#results for mv24
+mv24_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+#p_values
+p_values <- sum_res1$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+mv24_table <- cbind(mv24_table,p_values)
+print(mv24_table)
+```
+
+## mv hours 0
+
+```{r}
+total$mv0 <- factor(ifelse(total$vent_hour > 0, 1, 0))
+```
+
+```{r}
+res12 <- glm(mv0 ~ combined+admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res12 <- summary(res12)
+#sum_res12
+```
+
+```{r}
+invfisher.logit <- vcov(res12)
+CI.logit = res12$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res12, newdata = total, type = "response")
+lower_ci <- predict(res12, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res12, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res12, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res12, type = "response", se.fit = TRUE)$se.fit
+
+mv0_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res12$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+mv0_table <- cbind(mv0_table,p_values)
+print(mv0_table)
+```
+
+## mv hours 12
+
+```{r}
+total$mv12 <- factor(ifelse(total$vent_hour > 12, 1, 0))
+```
+
+```{r}
+res2 <- glm(mv12 ~ combined+admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res2 <- summary(res2)
+#sum_res2
+```
+
+```{r}
+invfisher.logit <- vcov(res2)
+CI.logit = res2$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res2, newdata = total, type = "response")
+lower_ci <- predict(res2, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res2, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res2, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res2, type = "response", se.fit = TRUE)$se.fit
+
+mv12_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res2$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+mv12_table <- cbind(mv12_table,p_values)
+print(mv12_table)
+```
+
+
+## mv hours 48
+
+```{r}
+total$mv48 <- factor(ifelse(total$vent_hour > 48, 1, 0))
+```
+
+```{r}
+res3 <- glm(mv48 ~ combined+admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res3 <- summary(res3)
+#sum_res3
+```
+
+```{r}
+invfisher.logit <- vcov(res3)
+CI.logit = res3$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res3, newdata = total, type = "response")
+lower_ci <- predict(res3, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res3, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res3, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res3, type = "response", se.fit = TRUE)$se.fit
+
+mv48_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res3$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+mv48_table <- cbind(mv48_table,p_values)
+print(mv48_table)
+```
+
+## mv hours >7 DAYS (168 HOURS)
+
+```{r}
+total$mv168 <- factor(ifelse(total$vent_hour > 168, 1, 0))
+```
+
+```{r}
+res13 <- glm(mv168 ~ combined+admission_type+age+bmi+charlson_comorbidity_index + cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res13 <- summary(res13)
+#sum_res3
+```
+
+```{r}
+invfisher.logit <- vcov(res13)
+CI.logit = res3$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res13, newdata = total, type = "response")
+lower_ci <- predict(res13, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res13, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res13, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res13, type = "response", se.fit = TRUE)$se.fit
+
+mv168_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res13$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+mv168_table <- cbind(mv168_table,p_values)
+print(mv168_table)
+```
+
+```{r}
+mv0_table$mv <- "0"
+mv12_table$mv <- "12"
+mv24_table$mv <- "24"
+mv48_table$mv <- "48"
+mv168_table$mv <- "168"
+
+combined_data <- bind_rows(mv0_table, mv12_table,mv24_table,mv48_table,mv168_table)
+
+combined_data$result_predicted <- (1-combined_data$predicted)*100
+combined_data$result_lower_ci <- (1-combined_data$upper_ci)*100
+combined_data$result_upper_ci <- (1-combined_data$lower_ci)*100
+
+                         
+p_values_filtered <- combined_data[!is.na(combined_data$p_values), ]
+
+p_values_filtered <- p_values_filtered %>% 
+  mutate(p_values = round(p_values, digits = 8))
+# Function to add stars to p-values less than a threshold
+
+spacing <- 0.02
+#my_palette <- c('#C1CCAE','#A9A7D6','#8DC0B1','#F2C190')
+#my_palette <- c('#C1CCAE','#F8D695','#A9A7D6','#EDB3B2')
+my_palette <- c('#162C9a',"#9F2218",'#81b6e3','#F07928')
+
+```
+
+
+combined_data$p_value_category <- ifelse(combined_data$p_value < 0.001, "***",
+                                         ifelse(combined_data$p_value < 0.01, "**",
+                                                ifelse(combined_data$p_value < 0.05, "*", "")))
+
+
+## p-value stars
+
+
+line_mv <- ggplot(combined_data, aes(x = factor(mv, level = c('0', '12', '24', '48','168')), y = result_predicted, group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = result_lower_ci, ymax = result_upper_ci), width = 0.1) +
+  geom_line(linewidth = 1, aes(label = p_value_category)) +
+  geom_text(aes(label = p_value_category), hjust = 0, vjust = 4, size = 4) +
+  labs(x = "MV duration (hour)", y = "MV removal rate (%)") +
+  scale_color_manual(name = NULL, values = my_palette) +
+  scale_y_continuous(limits = c(0, 110), expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+    legend.position = "bottom",
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),    # Remove major vertical grid lines
+    panel.grid.minor = element_blank(),    # Remove minor vertical grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black", linewidth = 0.5),
+    panel.grid.major.y = element_line(colour = "grey", linetype = "solid", linewidth = 0.2)) +
+  guides(color = guide_legend(override.aes = list(label = "", shape = 0, linetype = 1)))  # Remove the label and keep only the color lines
+
+line_mv
+
+
+```{r}
+line_mv <- ggplot(combined_data, aes(x = factor(mv, level = c('0', '12', '24', '48','168')), y = result_predicted, group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = result_lower_ci, ymax = result_upper_ci), width = 0.1) +
+  geom_line(linewidth = 1) + 
+  labs(x = "MV duration (hour)", y = "MV removal rate (%)") +
+  scale_color_manual(name = NULL,values = my_palette) +
+  scale_y_continuous(limits = c(0, 110), expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+#    legend.position = "bottom",
+#    legend.justification = c(1, 0),
+#    legend.box.just = "right",
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),    # Remove major vertical grid lines
+    panel.grid.minor = element_blank(),    # Remove minor vertical grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black", linewidth = 0.5),
+    panel.grid.major.y = element_line(colour = "grey", linetype = "solid", linewidth = 0.2)  # Customize horizontal grid lines
+  ) + theme(legend.position =  c(0.8, 0.25)) +
+  theme(legend.background = element_rect(fill = "white", colour = "grey")) +
+  theme(legend.key.height= unit(0.4, 'cm'),
+        legend.key.width= unit(0.2, 'cm'))
+line_mv
+```
+
+
+As we can see from the graph, at 0 hour which means patients remove ventilation as soon as they get into ICU, black female has the lowest probability to remove ventilation at 0 hour while white male has higher probability to remove ventilation. At 12 hour when they get into ICU, 70% of white male could remove ventilation within 12 hours, while black female has 57%, black male has 59%, and white female has 65%. For 24 hour, white male has the probability of removing ventilation within 24 hour is 89%, while white female, black male, black female has probability removing of 86%, 80%, 77% respectively.
+
+
+#### icu days 3
+
+```{r}
+res4 <- glm(icu_day3 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial(link = 'logit'))
+sum_res4 <- summary(res4)
+#sum_res4
+```
+
+```{r}
+invfisher.logit <- vcov(res4)
+CI.logit = res4$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res4, newdata = total, type = "response")
+lower_ci <- predict(res4, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res4, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res4, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res4, type = "response", se.fit = TRUE)$se.fit
+#results for mv24
+icu3_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res4$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+icu3_table <- cbind(icu3_table,p_values)
+print(icu3_table)
+```
+
+## icu days 2
+
+```{r}
+total$icu_day2 <- factor(ifelse(total$los_icu_day > 2, 1, 0))
+```
+
+```{r}
+res5 <- glm(icu_day2 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res5 <- summary(res5)
+#sum_res5
+```
+
+```{r}
+invfisher.logit <- vcov(res5)
+CI.logit = res5$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res5, newdata = total, type = "response")
+lower_ci <- predict(res5, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res5, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res5, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res5, type = "response", se.fit = TRUE)$se.fit
+#results for icu2
+icu2_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res5$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+icu2_table <- cbind(icu2_table,p_values)
+print(icu2_table)
+```
+
+## icu days 7
+
+```{r}
+total$icu_day7 <- factor(ifelse(total$los_icu_day > 7, 1, 0))
+```
+
+```{r}
+res6 <- glm(icu_day7 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res6 <- summary(res6)
+#sum_res6
+```
+
+```{r}
+invfisher.logit <- vcov(res6)
+CI.logit = res6$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res6, newdata = total, type = "response")
+lower_ci <- predict(res6, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res6, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res6, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res6, type = "response", se.fit = TRUE)$se.fit
+#results for icu2
+icu7_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res6$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+icu7_table <- cbind(icu7_table,p_values)
+print(icu7_table)
+```
+
+## icu days 14
+
+```{r}
+total$icu_day14 <- factor(ifelse(total$los_icu_day > 14, 1, 0))
+```
+
+```{r}
+res7 <- glm(icu_day14 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res7 <- summary(res7)
+#sum_res7
+```
+
+```{r}
+invfisher.logit <- vcov(res7)
+CI.logit = res7$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res7, newdata = total, type = "response")
+lower_ci <- predict(res7, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res7, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res7, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res7, type = "response", se.fit = TRUE)$se.fit
+#results for icu2
+icu14_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res7$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+icu14_table <- cbind(icu14_table,p_values)
+print(icu14_table)
+```
+
+
+
+```{r}
+icu2_table$icu <- "2"
+icu3_table$icu <- "3"
+icu7_table$icu <- "7"
+icu14_table$icu <- "14"
+
+combined_data2 <- bind_rows(icu2_table,icu3_table,icu7_table,icu14_table)
+p_values_filtered <- combined_data2[!is.na(combined_data2$p_values), ]
+
+combined_data2$result_predicted <- (1-combined_data2$predicted)*100
+combined_data2$result_lower_ci <- (1-combined_data2$upper_ci)*100
+combined_data2$result_upper_ci <- (1-combined_data2$lower_ci)*100
+
+spacing <- 0.06
+```
+
+```{r}
+line_icu <- ggplot(combined_data2, aes(x = factor(icu, level = c('2', '3', '7', '14')), y = result_predicted, group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = result_lower_ci, ymax = result_upper_ci), width = 0.1) +
+  geom_line(size = 1) +
+  labs(x = "ICU stay duration (day)", y = "ICU transfer rate (%)") +
+  scale_color_manual(name = NULL,values = my_palette) +
+  scale_y_continuous(limits = c(0, 110), expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+#    legend.position = "bottom",
+#    legend.justification = c(1, 0),
+#    legend.box.just = "right",
+    legend.position = "none",            # Remove legend
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),    # Remove major vertical grid lines
+    panel.grid.minor = element_blank(),    # Remove minor vertical grid lines
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black", size = 0.5),
+    panel.grid.major.y = element_line(colour = "grey", linetype = "solid", size = 0.2)) 
+#+ theme(legend.position =  c(0.8, 0.25))
+line_icu 
+```
+
+
+
+
+
+2 day here means the probability of each subgroup leaving icu within 2 days, same for 3 days, 7 days, and 14 days.
+
+
+### hopital days 3
+
+```{r}
+res8 <- glm(hos_day3 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res8 <- summary(res8)
+#sum_res8
+```
+
+```{r}
+invfisher.logit <- vcov(res8)
+CI.logit = res8$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res8, newdata = total, type = "response")
+lower_ci <- predict(res8, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res8, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res8, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res8, type = "response", se.fit = TRUE)$se.fit
+#results for hos3
+hos3_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res8$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+hos3_table <- cbind(hos3_table,p_values)
+print(hos3_table)
+```
+
+## hospital days 7
+
+```{r}
+total$hos_day7 <- factor(ifelse(total$los_hospital_day > 7, 1, 0))
+```
+
+```{r}
+res9 <- glm(hos_day7 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res9 <- summary(res9)
+#sum_res9
+```
+
+```{r}
+invfisher.logit <- vcov(res9)
+CI.logit = res9$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res9, newdata = total, type = "response")
+lower_ci <- predict(res9, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res9, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res9, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res9, type = "response", se.fit = TRUE)$se.fit
+#results for hos3
+hos7_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res9$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+hos7_table <- cbind(hos7_table,p_values)
+print(hos7_table)
+```
+
+
+
+## hospital days 14
+
+```{r}
+total$hos_day14 <- factor(ifelse(total$los_hospital_day > 14, 1, 0))
+```
+
+```{r}
+res10 <- glm(hos_day14 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res10 <- summary(res10)
+#sum_res10
+```
+
+```{r}
+invfisher.logit <- vcov(res10)
+CI.logit = res10$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res10, newdata = total, type = "response")
+lower_ci <- predict(res10, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res10, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res10, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res10, type = "response", se.fit = TRUE)$se.fit
+#results for hos3
+hos14_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res10$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+hos14_table <- cbind(hos14_table,p_values)
+print(hos14_table)
+```
+
+## hospital days 30
+
+```{r}
+total$hos_day30 <- factor(ifelse(total$los_hospital_day > 30, 1, 0))
+```
+
+```{r}
+res11 <- glm(hos_day30 ~ combined + admission_type+age+bmi+charlson_comorbidity_index +
+                    cabg+valve_surgery+sofa, data = total, family = binomial)
+sum_res11 <- summary(res11)
+#sum_res11
+```
+
+```{r}
+invfisher.logit <- vcov(res11)
+CI.logit = res11$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c("White female", "Black male", "Black female",'admission_type','age','bmi','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+out.hos.f
+```
+
+```{r}
+# Get the predicted probabilities
+predicted <- predict(res11, newdata = total, type = "response")
+lower_ci <- predict(res11, type = "response", se.fit = TRUE)$fit - 1.96 * predict(res11, type = "response", se.fit = TRUE)$se.fit 
+upper_ci <- predict(res11, type = "response", se.fit = TRUE)$fit + 1.96 * predict(res11, type = "response", se.fit = TRUE)$se.fit
+#results for hos3
+hos30_table <- aggregate(cbind(predicted, lower_ci, upper_ci) ~ combined, data = total, FUN = mean)
+# Print the aggregated data
+p_values <- sum_res11$coefficients[2:4, "Pr(>|z|)"]
+p_values <- data.frame(p_values = c(NA,p_values))
+rownames(p_values) <- c("White male", "White female", "Black male", "Black female")
+hos30_table <- cbind(hos30_table,p_values)
+print(hos30_table)
+```
+
+
+```{r}
+hos3_table$hos <- "3"
+hos7_table$hos <- "7"
+hos14_table$hos <- "14"
+hos30_table$hos <- "30"
+
+combined_data3 <- bind_rows(hos3_table,hos7_table,hos14_table,hos30_table)
+p_values_filtered <- combined_data3[!is.na(combined_data3$p_values), ]
+
+
+combined_data3$result_predicted <- (1-combined_data3$predicted)*100
+combined_data3$result_lower_ci <- (1-combined_data3$upper_ci)*100
+combined_data3$result_upper_ci <- (1-combined_data3$lower_ci)*100
+
+
+spacing <- 0.04
+```
+
+```{r}
+line_hospital <- ggplot(combined_data3, aes(x = factor(hos, level = c('3', '7', '14', '30')), y = result_predicted, group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = result_lower_ci, ymax = result_upper_ci), width = 0.1) +
+  geom_line(size = 1) +
+  labs(x = "Hospital stay duration (day)", y = "Hospital discharge rate (%)") +
+  scale_color_manual(name = NULL, values = my_palette) +
+  scale_y_continuous(limits = c(0, 110), expand = c(0, 0)) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 12),
+#    legend.position = "bottom",          # Set legend position to bottom
+ #   legend.justification = c(1, 1),      # Set legend justification to bottom right
+#    legend.box.just = "right",
+    legend.position = "none",            # Remove legend
+    panel.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(colour = "black", size = 0.5),
+    panel.grid.major.y = element_line(colour = "grey", linetype = "solid", size = 0.2)) 
+#+ theme(legend.position =  c(0.8, 0.25))
+line_hospital 
+```
+
+
+
+3 day here means the probability of each subgroup leaving hospital within 3 days, same for 7 days, 14 days, and 30 days.
+
+```{r}
+#install.packages("ggpubr")
+library(ggpubr)
+line_combined <- ggarrange(line_mv, line_icu, line_hospital,
+                  #labels = c("a)", "b)", "c)"),
+                     common.legend = FALSE, ncol = 3, nrow = 1)
+ggsave("line_combined.pdf", line_combined,width = 10, height = 3)
+```
+
+
+#install.packages("cowplot")
+library(cowplot)
+
+line_combined <- grid.arrange(line_mv, line_icu, line_hospital, nrow = 1,
+             widths = c(0.2, 0.2, 0.2),  # Adjust the width proportions
+             heights = c(0.1))
+
+ggsave("line_combined.pdf", line_combined,width = 10, height = 3)
+
+
+
+
+## Conclusion
+Corresponding to PSM study, black female, black male and whilte female tend to have longer mv hours, icu days, and hospital days compare to black male with adjusted confounders: age, admission type, charlson comorbidity index, cabg, valve surgery and sofa score. 
+
+There are no significant difference for black male, white male for icu days of 7 and 14, no significant difference between all four subgroups for hospital day 3 and no significant difference between black female, black male, and white male for hospital days of 30, and no significant difference between black male and white male for ventilation hours of 0 meaning they stopped ventilation as soon as they get into icu.

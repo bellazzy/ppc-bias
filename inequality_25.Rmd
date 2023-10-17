@@ -1,0 +1,386 @@
+---
+title: "Inequality Study - PSM"
+output: pdf_document
+date: '2023-05-10'
+author: 'Shihui Zhu'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tableone)
+library(tidyverse)
+library(MatchIt)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+```
+
+## Read in data
+
+* Outcomes: vent hours, hospital days, icu days
+* Controlling variables: age, bmi, CCI score, SOFA score, Surgery type (cabg, valve)
+* Varaibles: race (black and white), gender
+
+```{r}
+#import data
+eicu <- read.csv("~/Desktop/301/PPC/data/hf_eicu.csv",row.names = 1, header = TRUE)
+mimic <- read.csv("~/Desktop/301/PPC/data/hf_mimic.csv", row.names = 1, header = TRUE)
+```
+
+## Select eICU patients beds number > 250, MIMIC age outlier
+
+```{r}
+eicu <- eicu %>% dplyr::filter(numbedscategory %in% c(">= 500", "250 - 499"))
+mimic <- mimic %>% dplyr::filter(age != 300)
+```
+
+## Select variables
+
+```{r}
+## fill na for MV hours
+eicu[is.na(eicu)] <- 0
+mimic[is.na(mimic)] <- 0
+
+vars <- c('admission_type','bmi', 'gender', 'age', 'charlson_comorbidity_index', 'ethnicity', 'cabg', 'valve_surgery', 'sofa', 'vent_hour', 'los_hospital_day', 'los_icu_day')
+
+eicu <- eicu %>% select(all_of(vars))
+mimic <- mimic %>% select(all_of(vars))
+
+total <- rbind(eicu, mimic) %>%
+  filter(ethnicity %in% c('black', 'white'))
+  # vent hour -> mv > 24, mv <= 24
+```
+
+total$mv <- factor(ifelse(total$vent_hour > 24, 1, 0))
+total$los_hospital_day <- factor(ifelse(total$los_hospital_day > 7, 1, 0))
+total$los_icu_day <- factor(ifelse(total$los_icu_day > 3, 1, 0))
+#total <- total %>% select(-vent_hour)
+
+
+```{r}
+total$bmi_c <-  ifelse(total$bmi < 18.5, "Underweight",
+                 ifelse(total$bmi >= 18.5 & total$bmi < 25, "Healthy Weight",
+                 ifelse(total$bmi >= 25 & total$bmi < 30, "Overweight",
+                 ifelse(total$bmi >= 30 & total$bmi < 40, "Obese",                                             "Extremely Obese"))))
+
+
+total$mv_group <-  ifelse(total$vent_hour == 0.000, "0",
+                 ifelse(total$vent_hour > 0 & total$vent_hour <= 12, "12",
+                 ifelse(total$vent_hour > 12 & total$vent_hour <= 24, "24",
+                 ifelse(total$vent_hour > 24 & total$vent_hour <= 48,"48",
+                 ifelse(total$vent_hour > 48 & total$vent_hour <= 168, "168",">168")))))
+
+total$los_icu_group <-  ifelse(total$los_icu_day <= 2, "2",
+                 ifelse(total$los_icu_day > 2 & total$los_icu_day <= 3, "3",
+                 ifelse(total$los_icu_day > 3 & total$los_icu_day <= 7, "7",
+                 ifelse(total$los_icu_day > 7 & total$los_icu_day <= 14, "14",">14"))))
+
+total$los_hospital_group <-  ifelse(total$los_hospital_day <= 3, "3",
+                 ifelse(total$los_hospital_day > 3 & total$los_hospital_day <= 7, "7",
+                 ifelse(total$los_hospital_day > 7 & total$los_hospital_day <= 14, "14",
+                 ifelse(total$los_hospital_day > 14 & total$los_hospital_day <= 30, "30", 
+                        ">30"))))
+```
+
+```{r}
+# Reorder levels of age_group variable
+#total$age_group <- factor(total$age_group, levels = c("18-45", "45-65", "65-75",">75"))
+
+# Reorder levels of mv_group variable
+total$mv_group <- factor(total$mv_group, levels = c("0", "12", "24", "48","168",">168"))
+
+# Reorder levels of los_icu_group variable
+total$los_icu_group <- factor(total$los_icu_group, levels = c("2", "3", "7", "14", ">14"))
+
+# Reorder levels of los_hospital_group variable
+total$los_hospital_group <- factor(total$los_hospital_group, levels = c("3", "7", "14", "30", ">30"))
+
+total$bmi_c <- factor(total$bmi_c, levels = c("Underweight", "Healthy Weight", "Overweight", "Obese", "Extremely Obese"))
+```
+
+## TableOne - before PSM with SMD
+
+```{r}
+# by gender
+table2 <- CreateTableOne(vars = c('age','ethnicity', 'bmi_c','admission_type',  'charlson_comorbidity_index', 'sofa', 'cabg', 'valve_surgery', 'mv_group', 'los_icu_group', 'los_hospital_group'),
+                         data = total,
+                         factorVars = c('admission_type',
+                                        'ethnicity',"bmi_c", 'cabg', 
+                                        'valve_surgery', 'mv_group', 
+                                        'los_icu_group',
+                                        'los_hospital_group'),
+                         strata = 'gender',
+                         smd = TRUE)
+
+table2 <- print(table2, smd=TRUE, showAllLevels = TRUE, noSpaces = TRUE, 
+                printToggle = FALSE, nonnormal = c("charlson_comorbidity_index", 'sofa','age'))
+write.csv(table2, file="~/Desktop/301/PPC/output/table1_bygender_beforematching.csv")
+```
+
+```{r}
+# by race
+table3 <- CreateTableOne(vars = c('age','gender', 'bmi_c','admission_type',  'charlson_comorbidity_index', 'sofa', 'cabg', 'valve_surgery', 'mv_group', 'los_icu_group', 'los_hospital_group'),
+                         data = total,
+                         factorVars = c('admission_type', 'bmi_c',
+                                        'gender', 'cabg', 
+                                        'valve_surgery', 
+                                        'mv_group', 
+                                        'los_icu_group',
+                                        'los_hospital_group'),
+                         strata = 'ethnicity',
+                         smd = TRUE)
+
+table3 <- print(table3, smd=TRUE, showAllLevels = TRUE, noSpaces = TRUE, 
+                printToggle = FALSE, nonnormal = c("charlson_comorbidity_index", 'sofa','age'))
+write.csv(table3, file="~/Desktop/301/PPC/output/table1_byrace_beforematching.csv")
+```
+
+
+## PSM
+
+0. Prepare 
+
+```{r}
+total[,c('admission_type', 'cabg', 'valve_surgery', 'gender', 'ethnicity')] <- 
+  lapply(total[,c('admission_type', 'cabg', 'valve_surgery', 'gender', 'ethnicity')], factor)
+total$ethnicity <- relevel(total$ethnicity, ref='white')
+total$gender <- relevel(total$gender, ref='M')
+```
+
+
+
+1. PSM matching
+
+
+1. Gender (control for ...)
+
+```{r}
+match_obj <- matchit(gender ~ age+ethnicity+bmi+admission_type+
+                         charlson_comorbidity_index+sofa+cabg+valve_surgery, data = total, 
+                     method = "nearest", distance = "glm",
+                     ratio = 1,
+                     replace = FALSE)
+summary(match_obj, standardize = T)$sum.matched
+```
+
+MAX SMD < 0.1
+
+### Plot the match result
+
+```{r}
+plot(match_obj, type = "jitter", interactive = FALSE, cex.main = 1)
+plot(summary(match_obj), abs = FALSE)
+```
+
+2. Race (control for ...)
+
+```{r}
+match_obj_1 <- matchit(ethnicity ~ age+gender+bmi+admission_type+
+                         charlson_comorbidity_index+sofa+cabg+valve_surgery, data = total,
+                       method = "nearest", distance = "glm",
+                    ratio = 1,
+                    replace = FALSE)
+summary(match_obj_1, standardize = T)$sum.matched
+```
+
+* MAX SMD < 0.1
+
+### Plot the match result
+
+```{r}
+plot(match_obj_1, type = "jitter", interactive = FALSE)
+plot(summary(match_obj_1), abs = FALSE)
+```
+
+## Extract Matched data
+
+```{r}
+matched_data <- match.data(match_obj)
+head(matched_data)
+
+matched_data_1 <- match.data(match_obj_1)
+head(matched_data_1)
+```
+
+## baseline covariates of matched data
+
+* test to see if varaibles are balanced
+
+```{r}
+# by gender
+table4 <- CreateTableOne (vars = c('age','ethnicity', 'bmi_c','admission_type',  'charlson_comorbidity_index', 'sofa', 'cabg', 'valve_surgery', 'mv_group', 'los_icu_group', 'los_hospital_group'),
+                          data = matched_data,
+                          factorVars = c('admission_type', "bmi_c",
+                                        'cabg', 
+                                        'ethnicity',
+                                        'valve_surgery',
+                                        'mv_group', 
+                                        'los_icu_group',
+                                        'los_hospital_group'),
+                          strata = 'gender',
+                          smd=TRUE)
+table4 <- print(table4, smd=TRUE, showAllLevels = TRUE, noSpaces = TRUE, 
+                printToggle = FALSE, nonnormal = c("charlson_comorbidity_index", 'sofa','age'))
+write.csv(table4, 
+          file="~/Desktop/301/PPC/output/table1_bygender_aftermatching.csv")
+```
+
+```{r}
+# by race
+table5 <- CreateTableOne (vars = c('age','gender', 'bmi_c','admission_type',  'charlson_comorbidity_index', 'sofa', 'cabg', 'valve_surgery', 'mv_group', 'los_icu_group', 'los_hospital_group'),
+                          data = matched_data_1,
+                          factorVars = c('admission_type', "bmi_c",
+                                        'cabg', 
+                                        'gender',
+                                        'valve_surgery',
+                                        'mv_group', 
+                                        'los_icu_group',
+                                        'los_hospital_group'),
+                          strata = 'ethnicity',
+                          smd=TRUE)
+table5 <- print(table5, smd=TRUE, showAllLevels = TRUE, noSpaces = TRUE, 
+                printToggle = FALSE, nonnormal = c("charlson_comorbidity_index", 'sofa','age'))
+write.csv(table5, file="~/Desktop/301/PPC/output/table1_byrace_aftermatching.csv")
+```
+
+### Inspection: 
+
+1. by gender: covariates are balanced (p.value > 0.05, SMD < 0.1), all three outcomes are not the same between groups
+
+2. by race: covariates are balanced (p.value > 0.05, SMD < 0.1), MV hours and hospital days are not the same between groups
+
+## ATT (Average Treatment Effect on the Treated)
+
+### LM
+
+1. Gender - affecting hospital days, icu days, and MV hours
+
+#### MV hours
+
+```{r}
+res <- glm(mv ~ gender, data = matched_data, 
+          weights = matched_data$weights, family = binomial(link = 'logit'))
+invfisher.logit <- vcov(res)
+CI.logit = res$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.mv.f) = c('female')
+out.mv.f
+```
+
+95% CI is (0.1041158, 0.3800868)
+
+#### ICU days
+
+```{r}
+res <- glm(los_icu_day ~ gender, data = matched_data, 
+          weights = matched_data$weights, family = binomial(link = 'logit'))
+invfisher.logit <- vcov(res)
+CI.logit = res$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.icu.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.icu.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.icu.f) = c('female')
+out.icu.f
+```
+
+#### Hospital days
+
+```{r}
+res <- glm(los_hospital_day ~ gender, data = matched_data, 
+          weights = matched_data$weights, family = binomial(link = 'logit'))
+invfisher.logit <- vcov(res)
+CI.logit = res$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.f) = c('female')
+out.hos.f
+```
+
+2. Race - affecting hospital days
+
+#### MV
+
+```{r}
+res <- glm(mv ~ ethnicity, data = matched_data_1, 
+          weights = matched_data_1$weights, family = binomial(link = 'logit'))
+invfisher.logit <- vcov(res)
+CI.logit = res$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.mv.race = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.race) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.mv.race) = c('black')
+out.mv.race
+```
+
+#### Hospital
+
+```{r}
+res <- glm(los_hospital_day ~ ethnicity, data = matched_data_1, 
+          weights = matched_data_1$weights, family = binomial(link = 'logit'))
+invfisher.logit <- vcov(res)
+CI.logit = res$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.hos.race = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.hos.race) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.hos.race) = c('black')
+out.hos.race
+```
+
+#### ICU
+
+```{r}
+res <- glm(los_icu_day ~ ethnicity, data = matched_data_1, 
+          weights = matched_data_1$weights, family = binomial(link = 'logit'))
+invfisher.logit <- vcov(res)
+CI.logit = res$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),
+                                              t(t(sqrt(diag(invfisher.logit)))))
+out.icu.race = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.icu.race) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+rownames(out.icu.race) = c('black')
+out.icu.race
+```
+
+No significant differece for icu days among race group
+
+## Summary
+
+```{r}
+out.f <- rbind(out.mv.f, out.icu.f, out.hos.f)
+row.names(out.f) <- c("MV 24 hours", "ICU 3 days", "Hospital 7 days")
+out.r <- rbind(out.mv.race, out.icu.race, out.hos.race)
+row.names(out.r) <- c("MV 24 hours", "ICU 3 days", "Hospital 7 days")
+out.f %>% knitr::kable(digits = 3)
+out.r %>% knitr::kable(digits = 3)
+```
+
+All are different except for ICU days among black and whites
+
+### Further
+
+1. Sensitivity test?
+
+2. Category -> 4?
+
+## Conclusion
+
+GLM regression of post-surgical MV hours, hospital hours, icu hours as a function of race and sex, controlling for age, CCI score, SOFA, along with procedure (cabg or valve), all included as covariates in the model.
+
+** Vent hours -> Qualitative, PMV yes or no
+** model for eICU
+** model for MIMIC
+** model MIMIC and eICU > 500
+** by Age
+** multiple ICU admissions among female patients with long MV hours
+
+** Plots
+0, 0-24, 24-48, 48-7d, >7d for MV hours
+0-3, 3-7, >7d
+
+
+
+
+
+

@@ -1,0 +1,844 @@
+---
+title: "bmi-gender"
+author: "Zhongyun Zhang"
+date: "2023-09-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## bmi
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+library(tableone)
+library(tidyverse)
+library(MatchIt)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+library("viridis")
+library(gridExtra)
+#install.packages("patchwork")
+library(patchwork)
+library(forestplot)
+library(grid)
+#install.packages("forestploter")
+library(forestploter)
+```
+
+```{r}
+#import data
+eicu <- read.csv("~/Desktop/301/PPC/data/hf_eicu.csv",row.names = 1, header = TRUE)
+mimic <- read.csv("~/Desktop/301/PPC/data/hf_mimic.csv", row.names = 1, header = TRUE)
+#View(eicu)
+```
+
+```{r}
+eicu <- subset(eicu,eicu$numbedscategory==">= 500" | eicu$numbedscategory=="250 - 499")
+```
+
+```{r}
+## fill na for MV hours
+eicu[is.na(eicu)] <- 0
+mimic[is.na(mimic)] <- 0
+# Remove rows with one patient with 300 in 'age' - mimic
+mimic <- mimic[mimic$age != "300", ]
+
+#select variables
+vars <- c('admission_type', 'gender', 'age','bmi', 'charlson_comorbidity_index', 'ethnicity', 'cabg', 'valve_surgery', 'sofa', 'vent_hour', 'los_hospital_day', 'los_icu_day')
+eicu <- eicu %>% select(all_of(vars))
+mimic <- mimic %>% select(all_of(vars))
+# combine eicu and mimic
+total <- rbind(eicu, mimic) %>%
+  filter(ethnicity %in% c('black', 'white'))
+#hist(total$ethnicity,total$age)
+total <- total[total$vent_hour >= 0,]
+```
+
+```{r}
+total$bmi_c <-  ifelse(total$bmi < 18.5, "Underweight",
+                 ifelse(total$bmi >= 18.5 & total$bmi < 25, "Healthy weight",
+                 ifelse(total$bmi >= 25 & total$bmi < 30, "Overweight",
+                 ifelse(total$bmi >= 30 & total$bmi < 40, "Obese",                                             "Extremely obese"))))
+
+# Count the frequencies of each BMI category
+bmi_counts <- table(total$bmi_c)
+bmi_counts <- bmi_counts[c("Underweight", "Healthy weight", "Overweight", "Obese","Extremely obese")]
+```
+
+```{r}
+# Plot the bar chart
+plot1 <- barplot(bmi_counts, 
+        xlab = "BMI category", 
+        ylab = "Patient number", 
+        las = 1.5, 
+        cex.names = 0.7, 
+        ylim = c(0,4000),
+        col = "skyblue", 
+        border = "black",
+        cex.axis = 0.7, cex.lab = 0.7,width = 0.3) 
+```
+
+## Gender
+## MV HOUR 24
+
+```{r}
+#male as 1 female as 0
+#total$gender <- factor(ifelse(total$gender == "M", 1, 0))
+#vent hour over 24 as 1, under 24 as 0
+total$vent24 <- factor(ifelse(total$vent_hour > 24, 1, 0))
+total$bmi_c <- factor(total$bmi_c, levels = c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese"))
+levels(total$bmi_c)
+total$bmi_c <- relevel(total$bmi_c, ref = "Healthy weight")
+```
+
+
+```{r}
+total$gender <- factor(total$gender)
+#levels(total$gender)
+total$gender <- relevel(total$gender, ref = "M")
+```
+
+```{r}
+total$ethnicity <- factor(total$ethnicity)
+#levels(total$ethnicity)
+total$ethnicity <- relevel(total$ethnicity, ref = "white")
+```
+
+
+### Underweight
+
+```{r}
+vent_24_1 <- glm(vent24 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Underweight"), family = binomial)
+sum_vent24_1 <- summary(vent_24_1)
+sum_vent24_1
+```
+
+```{r}
+invfisher.logit <- vcov(vent_24_1)
+CI.logit = vent_24_1$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_241 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_241)
+```
+
+
+### Healthy Weight
+
+```{r}
+vent_24_2 <- glm(vent24 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Healthy weight"), family = binomial)
+sum_vent24_2 <- summary(vent_24_2)
+sum_vent24_2
+```
+
+```{r}
+invfisher.logit <- vcov(vent_24_2)
+CI.logit = vent_24_2$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF','age','ethnicityblack', 'admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_242 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_242)
+```
+
+### Over Weight
+
+```{r}
+vent_24_3 <- glm(vent24 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Overweight"), family = binomial)
+sum_vent24_3 <- summary(vent_24_3)
+sum_vent24_3
+```
+
+```{r}
+invfisher.logit <- vcov(vent_24_3)
+CI.logit = vent_24_3$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF','age','ethnicityblack', 'admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_243 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_243)
+```
+
+### Obese
+
+```{r}
+vent_24_4 <- glm(vent24 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Obese"), family = binomial)
+sum_vent24_4 <- summary(vent_24_4)
+sum_vent24_4
+```
+
+```{r}
+invfisher.logit <- vcov(vent_24_4)
+CI.logit = vent_24_4$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF','age','ethnicityblack', 'admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_244 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_244)
+```
+
+
+### Extremely obese
+
+```{r}
+vent_24_5 <- glm(vent24 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Extremely obese"), family = binomial)
+sum_vent24_5 <- summary(vent_24_5)
+sum_vent24_5
+```
+
+```{r}
+invfisher.logit <- vcov(vent_24_5)
+CI.logit = vent_24_5$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF','age','ethnicityblack', 'admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_245 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_245)
+```
+### Table count
+
+```{r}
+df_mv24_1 <- total %>%
+  group_by(bmi_c, gender) %>%
+  count()%>%
+  pivot_wider(names_from = gender, values_from = n)%>%
+  rename(Male = M, Female = F, "BMI" = bmi_c)
+
+df_mv24_1
+```
+
+```{r}
+df_mv24_2 <- total %>%
+  group_by(bmi_c, gender, vent24) %>%
+  filter(vent24 == 0)%>%
+  count() %>%
+  pivot_wider(names_from = gender, values_from = n) %>%
+  rename(Male = M, Female = F, "BMI" = bmi_c) %>%
+  select("BMI", "Male", "Female")
+# Print the updated data frame
+#print(df_mv24_2)
+```
+
+```{r}
+combined_df1 <- inner_join(df_mv24_2, df_mv24_1, by = c("BMI"))
+
+# Connect the corresponding numbers with "/"
+combined_df1$Male <- paste(combined_df1$Male.x, combined_df1$Male.y, sep = "/")
+combined_df1$Female <- paste(combined_df1$Female.x, combined_df1$Female.y, sep = "/")
+
+# Remove the unnecessary columns
+combined_df1 <- combined_df1 %>%
+  select("BMI", "Male", "Female") %>%
+  select(-vent24)  
+# Print the combined dataframe
+combined_df1 <- print(combined_df1[2:4])
+#combined_df1
+```
+
+```{r}
+## Combine tables
+#mv24_table <- cbind(combined_df1,mv24_or,p_values_df)
+desired_order <- c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese")
+
+# Reorder the rows based on the desired order
+combined_df1 <- combined_df1 %>%
+  mutate(BMI = factor(BMI, levels = desired_order)) %>%
+  arrange(BMI)
+```
+
+
+### Odd Combined
+
+```{r}
+mv24_odd <- t(cbind(odd_241,odd_242,odd_243,odd_244,odd_245))
+new_col_names <- c("OddsRatio", "Lower_CI", "Upper_CI")  
+colnames(mv24_odd) <- new_col_names 
+new_row_names <- c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese") 
+rownames(mv24_odd) <- new_row_names 
+mv24_odd <- data.frame(mv24_odd)
+mv24_odd
+```
+
+### P-value
+
+```{r}
+mv24_odd$"OR(95% CI)" <- sprintf(
+  "%.2f (%.2f, %.2f)",
+  mv24_odd$OddsRatio,
+  mv24_odd$Lower_CI,
+  mv24_odd$Upper_CI
+)
+
+# Extract the p-values for the "genderF" variable from each regression
+p_values <- c(sum_vent24_1$coefficients["genderF", "Pr(>|z|)"],
+              sum_vent24_2$coefficients["genderF", "Pr(>|z|)"],
+              sum_vent24_3$coefficients["genderF", "Pr(>|z|)"],
+              sum_vent24_4$coefficients["genderF", "Pr(>|z|)"],
+              sum_vent24_5$coefficients["genderF", "Pr(>|z|)"])
+
+# Create a dataframe with one column for the p-values
+p_values_df <- data.frame(ifelse(p_values > 0.05, ">0.05", ifelse(p_values < 0.01, "<0.01", round(p_values, 3))))
+colnames(p_values_df) <- "P value"
+
+
+# Print the dataframe
+#print(p_values_df)
+table_mv <- cbind(combined_df1,mv24_odd,p_values_df)
+table_mv$'               '<- "               "
+colnames(table_mv)[ncol(table_mv)] <- "               "
+print(table_mv)
+```
+
+### Forest Plot
+
+```{r}
+tm <- forest_theme(base_size = 8,           # 设置基础字体大小
+                   refline_col = "red4",     # 设置参考线颜色为红色
+                   arrow_type = "closed",    # 设置箭头类型为闭合箭头
+                   footnote_col = "blue4",
+                   colnames_just = "center")   
+# 绘制森林图
+p1 <- forest(table_mv[, c("BMI","Male","Female","OR(95% CI)","P value",'               ')],   # 选择要在森林图中使用的数据列，这里包括变量名列、患者数量列、绘图要用的空白列和HR（95%CI）列
+            est = table_mv$OddsRatio,          # 效应值，也就是HR列
+            lower = table_mv$Lower_CI,  # 置信区间下限
+            upper = table_mv$Upper_CI,  # 置信区间上限
+            sizes = 0.2,        # 黑框框的大小
+            ci_column = 6,             # 在第3列（可信区间列）绘制森林图
+            ref_line = 1,              # 添加参考线
+#            arrow_lab = c("Low risk", "High Risk"),  # 箭头标签，用来表示效应方向，如何设置取决于你的样本情况
+            xlim = c(0,3),          # 设置x轴范围
+            ticks_at = c(0,1,2,3),  # 在指定位置添加刻度
+            theme = tm)               # 添加自定义主题
+#            footnote = "This is the demo data. Please feel free to change\nanything you want.")  # 添加脚注信息
+p1
+```
+
+## ICU Day 3
+
+```{r}
+#icu day over 3 as 1, under 3 as 0
+total$icu3 <- factor(ifelse(total$los_icu_day > 3, 1, 0))
+```
+
+### Underweight
+
+```{r}
+icu_3_1 <- glm(icu3 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Underweight"), family = binomial)
+sum_icu3_1 <- summary(icu_3_1)
+sum_icu3_1
+```
+
+```{r}
+invfisher.logit <- vcov(icu_3_1)
+CI.logit = icu_3_1$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_31 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_31)
+```
+
+
+### Healthy Weight
+
+```{r}
+icu_3_2 <- glm(icu3 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Healthy weight"), family = binomial)
+sum_icu3_2 <- summary(icu_3_2)
+sum_icu3_2
+```
+
+```{r}
+invfisher.logit <- vcov(icu_3_2)
+CI.logit = icu_3_2$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_32 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_32)
+```
+
+
+### Overweight
+
+```{r}
+icu_3_3 <- glm(icu3 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Overweight"), family = binomial)
+sum_icu3_3 <- summary(icu_3_3)
+sum_icu3_3
+```
+
+```{r}
+invfisher.logit <- vcov(icu_3_3)
+CI.logit = icu_3_3$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_33 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_33)
+```
+
+### Obese
+
+```{r}
+icu_3_4 <- glm(icu3 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Obese"), family = binomial)
+sum_icu3_4 <- summary(icu_3_4)
+sum_icu3_4
+```
+
+```{r}
+invfisher.logit <- vcov(icu_3_4)
+CI.logit = icu_3_4$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_34 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_34)
+```
+
+### Extremely Obese
+
+```{r}
+icu_3_5 <- glm(icu3 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Extremely obese"), family = binomial)
+sum_icu3_5 <- summary(icu_3_5)
+sum_icu3_5
+```
+
+```{r}
+invfisher.logit <- vcov(icu_3_5)
+CI.logit = icu_3_5$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_35 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_35)
+```
+
+### Table count
+
+```{r}
+df_icu3_1 <- total %>%
+  group_by(bmi_c, gender) %>%
+  count()%>%
+  pivot_wider(names_from = gender, values_from = n)%>%
+  rename(Male = M, Female = F, "BMI" = bmi_c)
+
+df_icu3_1
+```
+
+```{r}
+df_icu3_2 <- total %>%
+  group_by(bmi_c, gender, icu3) %>%
+  filter(icu3 == 0)%>%
+  count() %>%
+  pivot_wider(names_from = gender, values_from = n) %>%
+  rename(Male = M, Female = F, "BMI" = bmi_c) %>%
+  select("BMI", "Male", "Female")
+# Print the updated data frame
+print(df_icu3_2)
+```
+
+```{r}
+combined_df2 <- inner_join(df_icu3_2, df_icu3_1, by = c("BMI"))
+
+# Connect the corresponding numbers with "/"
+combined_df2$Male <- paste(combined_df2$Male.x, combined_df2$Male.y, sep = "/")
+combined_df2$Female <- paste(combined_df2$Female.x, combined_df2$Female.y, sep = "/")
+
+# Remove the unnecessary columns
+combined_df2 <- combined_df2 %>%
+  select("BMI", "Male", "Female") %>%
+  select(-icu3)  
+# Print the combined dataframe
+combined_df2 <- print(combined_df2[2:4])
+combined_df2
+```
+
+```{r}
+## Combine tables
+#icu3_table <- cbind(combined_df2,icu3_or)
+desired_order <- c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese")
+
+# Reorder the rows based on the desired order
+combined_df2 <- combined_df2 %>%
+  mutate(BMI = factor(BMI, levels = desired_order)) %>%
+  arrange(BMI)
+```
+
+### Odd Combined
+
+```{r}
+icu3_odd <- t(cbind(odd_31,odd_32,odd_33,odd_34,odd_35))
+new_col_names <- c("OddsRatio", "Lower_CI", "Upper_CI")  
+colnames(icu3_odd) <- new_col_names 
+new_row_names <- c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese")  
+rownames(icu3_odd) <- new_row_names 
+icu3_odd <- data.frame(icu3_odd)
+icu3_odd
+```
+
+### P-value
+
+```{r}
+icu3_odd$"OR(95% CI)" <- sprintf(
+  "%.2f (%.2f, %.2f)",
+  icu3_odd$OddsRatio,
+  icu3_odd$Lower_CI,
+  icu3_odd$Upper_CI
+)
+icu3_table <- cbind(combined_df2,icu3_odd,p_values_df)
+print(icu3_table)
+```
+
+```{r}
+# Extract the p-values for the "genderF" variable from each regression
+p_values <- c(sum_icu3_1$coefficients["genderF", "Pr(>|z|)"],
+              sum_icu3_2$coefficients["genderF", "Pr(>|z|)"],
+              sum_icu3_3$coefficients["genderF", "Pr(>|z|)"],
+              sum_icu3_4$coefficients["genderF", "Pr(>|z|)"],
+              sum_icu3_5$coefficients["genderF", "Pr(>|z|)"])
+
+# Create a dataframe with one column for the p-values
+p_values_df <- data.frame(ifelse(p_values > 0.05, ">0.05", ifelse(p_values < 0.01, "<0.01", round(p_values, 3))))
+colnames(p_values_df) <- "P value"
+
+# Print the dataframe
+#print(p_values_df)
+
+# Print the dataframe
+table_icu <- cbind(combined_df2,icu3_odd,p_values_df)
+table_icu$'               '<- "               "
+colnames(table_icu)[ncol(table_icu)] <- "               "
+print(table_icu)
+```
+
+### forest plot
+
+```{r}
+tm <- forest_theme(base_size = 8,           # 设置基础字体大小
+                   refline_col = "red4",     # 设置参考线颜色为红色
+                   arrow_type = "closed",    # 设置箭头类型为闭合箭头
+                   footnote_col = "blue4",
+                   colnames_just = "center")   
+# 绘制森林图
+p2 <- forest(table_icu[, c("BMI","Male","Female","OR(95% CI)","P value",'               ')],   # 选择要在森林图中使用的数据列，这里包括变量名列、患者数量列、绘图要用的空白列和HR（95%CI）列
+            est = table_icu$OddsRatio,          # 效应值，也就是HR列
+            lower = table_icu$Lower_CI,  # 置信区间下限
+            upper = table_icu$Upper_CI,  # 置信区间上限
+            sizes = 0.2,        # 黑框框的大小
+            ci_column = 6,             # 在第3列（可信区间列）绘制森林图
+            ref_line = 1,              # 添加参考线
+#            arrow_lab = c("Low risk", "High Risk"),  # 箭头标签，用来表示效应方向，如何设置取决于你的样本情况
+            xlim = c(0,3),          # 设置x轴范围
+            ticks_at = c(0,1,2,3),  # 在指定位置添加刻度
+            theme = tm)               # 添加自定义主题
+#            footnote = "This is the demo data. Please feel free to change\nanything you want.")  # 添加脚注信息
+p2
+
+```
+
+
+## Hospital Day 7
+
+```{r}
+#hos day over 7 as 1, under 7 as 0
+total$hos7 <- factor(ifelse(total$los_hospital_day > 7, 1, 0))
+```
+
+### Underweight
+
+```{r}
+hos_7_1 <- glm(hos7 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Underweight"), family = binomial)
+sum_hos7_1 <- summary(hos_7_1)
+sum_hos7_1
+```
+
+```{r}
+invfisher.logit <- vcov(hos_7_1)
+CI.logit = hos_7_1$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_71 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_71)
+```
+
+
+### Healthy Weight
+
+```{r}
+hos_7_2 <- glm(hos7 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Healthy weight"), family = binomial)
+sum_hos7_2 <- summary(hos_7_2)
+sum_hos7_2
+```
+
+```{r}
+invfisher.logit <- vcov(hos_7_2)
+CI.logit = hos_7_2$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_72 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_72)
+```
+
+### Overweight
+
+```{r}
+hos_7_3 <- glm(hos7 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Overweight"), family = binomial)
+sum_hos7_3 <- summary(hos_7_3)
+sum_hos7_3
+```
+
+```{r}
+invfisher.logit <- vcov(hos_7_3)
+CI.logit = hos_7_3$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_73 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_73)
+```
+
+
+### Obese
+
+```{r}
+hos_7_4 <- glm(hos7 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Obese"), family = binomial)
+sum_hos7_4 <- summary(hos_7_4)
+sum_hos7_4
+```
+
+```{r}
+invfisher.logit <- vcov(hos_7_4)
+CI.logit = hos_7_4$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_74 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_74)
+```
+
+### Extremely Obese
+
+```{r}
+hos_7_5 <- glm(hos7 ~ gender+age+ethnicity+admission_type+charlson_comorbidity_index +cabg+valve_surgery+sofa, data =subset(total, bmi_c == "Extremely obese"), family = binomial)
+sum_hos7_5 <- summary(hos_7_5)
+sum_hos7_5
+```
+
+```{r}
+invfisher.logit <- vcov(hos_7_5)
+CI.logit = hos_7_5$coefficients + kronecker(t(c(0,qnorm(0.025),-qnorm(0.025))),t(t(sqrt(diag(invfisher.logit)))))
+out.mv.f = cbind(exp(CI.logit)[-1,,drop=FALSE])
+colnames(out.mv.f) = c('Estimate for OR','95% CI Lower','95% CI Upper')
+#rownames(out.mv.f) = c('bmi_cUnderweight','bmi_cOverweight', 'bmi_cObesity,class I','bmi_cObesity,class II', 'bmi_cObesity,class III ',  'age', 'ethnicityblack','genderM','admission_type','charlson_comorbidity_index','cabg','valve_surgery','sofa')
+rownames(out.mv.f) = c( 'genderF', 'age','ethnicityblack','admission_type',
+                        'charlson_comorbidity_index',
+                        'cabg','valve_surgery','sofa')
+out.mv.f
+odd_75 <- data.frame(out.mv.f[1, ])
+# Print the new dataframe
+print(odd_75)
+```
+
+### Table count
+
+```{r}
+df_hos7_1 <- total %>%
+  group_by(bmi_c, gender) %>%
+  count()%>%
+  pivot_wider(names_from = gender, values_from = n)%>%
+  rename(Male = M, Female = F, "BMI" = bmi_c)
+
+df_hos7_1
+```
+
+```{r}
+df_hos7_2 <- total %>%
+  group_by(bmi_c, gender, hos7) %>%
+  filter(hos7 == 0)%>%
+  count() %>%
+  pivot_wider(names_from = gender, values_from = n) %>%
+  rename(Male = M, Female = F, "BMI" = bmi_c) %>%
+  select("BMI", "Male", "Female")
+# Print the updated data frame
+print(df_hos7_2)
+```
+
+```{r}
+combined_df3 <- inner_join(df_hos7_2, df_hos7_1, by = c("BMI"))
+
+# Connect the corresponding numbers with "/"
+combined_df3$Male <- paste(combined_df3$Male.x, combined_df3$Male.y, sep = "/")
+combined_df3$Female <- paste(combined_df3$Female.x, combined_df3$Female.y, sep = "/")
+
+# Remove the unnecessary columns
+combined_df3 <- combined_df3 %>%
+  select("BMI", "Male", "Female") %>%
+  select(-hos7)  
+# Print the combined dataframe
+combined_df3 <- print(combined_df3[2:4])
+combined_df3
+```
+
+```{r}
+## Combine tables
+#hos7_table <- cbind(combined_df3,)
+desired_order <- c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese")
+
+# Reorder the rows based on the desired order
+combined_df3 <- combined_df3 %>%
+  mutate(BMI = factor(BMI, levels = desired_order)) %>%
+  arrange(BMI)
+```
+
+### Odd Combined
+
+```{r}
+hos7_odd <- t(cbind(odd_71,odd_72,odd_73,odd_74,odd_75))
+new_col_names <- c("OddsRatio", "Lower_CI", "Upper_CI")  
+colnames(hos7_odd) <- new_col_names 
+new_row_names <- c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese")
+rownames(hos7_odd) <- new_row_names 
+hos7_odd <- data.frame(hos7_odd)
+hos7_odd
+```
+
+### P-value
+
+```{r}
+hos7_odd$"OR(95% CI)" <- sprintf(
+  "%.2f (%.2f, %.2f)",
+  hos7_odd$OddsRatio,
+  hos7_odd$Lower_CI,
+  hos7_odd$Upper_CI
+)
+```
+
+
+```{r}
+# Extract the p-values for the "genderF" variable from each regression
+p_values <- c(sum_hos7_1$coefficients["genderF", "Pr(>|z|)"],
+              sum_hos7_2$coefficients["genderF", "Pr(>|z|)"],
+              sum_hos7_3$coefficients["genderF", "Pr(>|z|)"],
+              sum_hos7_4$coefficients["genderF", "Pr(>|z|)"],
+              sum_hos7_5$coefficients["genderF", "Pr(>|z|)"])
+
+# Create a dataframe with one column for the p-values
+p_values_df <- data.frame(ifelse(p_values > 0.05, ">0.05", ifelse(p_values < 0.01, "<0.01", round(p_values, 3))))
+colnames(p_values_df) <- "P value"
+
+table_hos <- cbind(combined_df3,hos7_odd, p_values_df)
+table_hos$'               '<- "               "
+colnames(table_hos)[ncol(table_hos)] <- "               "
+print(table_hos)
+print(table_hos)
+```
+
+### forest plot
+
+```{r}
+tm <- forest_theme(base_size = 8,           # 设置基础字体大小
+                   refline_col = "red4",     # 设置参考线颜色为红色
+                   arrow_type = "closed",    # 设置箭头类型为闭合箭头
+                   footnote_col = "blue4",
+                   colnames_just_each = "center")   
+# 绘制森林图
+p3 <- forest(table_hos[, c("BMI","Male","Female","OR(95% CI)","P value",'               ')],   # 选择要在森林图中使用的数据列，这里包括变量名列、患者数量列、绘图要用的空白列和HR（95%CI）列
+            est = table_hos$OddsRatio,          # 效应值，也就是HR列
+            lower = table_hos$Lower_CI,  # 置信区间下限
+            upper = table_hos$Upper_CI,  # 置信区间上限
+            sizes = 0.2,        # 黑框框的大小
+            ci_column = 6,             # 在第3列（可信区间列）绘制森林图
+            ref_line = 1,              # 添加参考线
+#            arrow_lab = c("Low risk", "High Risk"),  # 箭头标签，用来表示效应方向，如何设置取决于你的样本情况
+            xlim = c(0,3),          # 设置x轴范围
+            ticks_at = c(0,1,2,3),  # 在指定位置添加刻度
+            theme = tm)               # 添加自定义主题
+#            footnote = "This is the demo data. Please feel free to change\nanything you want.")  # 添加脚注信息
+p3
+
+```
+## Save Table
+
+```{r}
+ggsave("mv24_bmi_gender.png", plot = p1)
+ggsave("icu3_bmi_gender.png", plot = p2)
+ggsave("hos7_bmi_gender.png", plot = p3)
+```
+
+

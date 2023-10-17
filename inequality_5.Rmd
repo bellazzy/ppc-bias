@@ -1,0 +1,255 @@
+---
+title: "inequality_5"
+author: "Zhongyun Zhang"
+date: "2023-08-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+library(tableone)
+library(tidyverse)
+library(MatchIt)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+library("viridis")
+#install.packages("gtools", repos="https://cran.rstudio.com/")
+library(gtools)
+```
+
+## Data Processing
+
+* Outcomes: vent hours, hospital days, icu days
+* Controlling variables: age, CCI score, SOFA score, Surgery type (cabg, valve)
+* Varaibles: race (black and white), gender
+
+```{r}
+#import data
+eicu <- read.csv("~/Desktop/301/PPC/data/hf_eicu.csv",row.names = 1, header = TRUE)
+mimic <- read.csv("~/Desktop/301/PPC/data/hf_mimic.csv", row.names = 1, header = TRUE)
+#View(eicu)
+```
+
+```{r}
+#selecting eicu number of beds>250 
+eicu <- subset(eicu,eicu$numbedscategory==">= 500" | eicu$numbedscategory=="250 - 499")
+table(eicu$ethnicity)
+table(mimic$ethnicity)
+```
+
+```{r}
+## fill na for MV hours
+eicu[is.na(eicu)] <- 0
+mimic[is.na(mimic)] <- 0
+# Remove rows with one patient with 300 in 'age' - mimic
+mimic <- mimic[mimic$age != "300", ]
+```
+
+```{r}
+#select variables
+vars <- c('admission_type', 'gender', 'age',"bmi", 'charlson_comorbidity_index', 'ethnicity', 'cabg', 'valve_surgery', 'sofa', 'vent_hour', 'los_hospital_day', 'los_icu_day')
+eicu <- eicu %>% select(all_of(vars))
+mimic <- mimic %>% select(all_of(vars))
+# combine eicu and mimic
+total <- rbind(eicu, mimic) %>%
+  filter(ethnicity %in% c('black', 'white'))
+#hist(total$ethnicity,total$age)
+total <- total[total$vent_hour >= 0,]
+#table(total$ethnicity)
+```
+
+
+```{r}
+# Assuming your dataset is named 'data' and 'gender' and 'ethnicity' are existing columns
+total$combined <- ifelse(total$gender == "M" & total$ethnicity == "white", "White male",
+                 ifelse(total$gender == "F" & total$ethnicity == "white", "White female",
+                 ifelse(total$gender == "M" & total$ethnicity == "black", "Black male",
+                 ifelse(total$gender == "F" & total$ethnicity == "black", "Black female",NA))))
+# Convert 'combined' column to numeric representation
+total$combined <- factor(total$combined, levels = c("White male", "White female", "Black male", "Black female"), labels = c(1, 2, 3, 4))
+levels(total$combined) <- c("White male", "White female", "Black male", "Black female")
+table(total$combined)
+```
+
+
+total$age_group <-  ifelse(total$age > 18 & total$age <= 45, "18-45",
+                 ifelse(total$age > 45 & total$age <= 65, "45-65",
+                 ifelse(total$age > 65 & total$age <= 75, "65-75",">75")))
+```{r}
+total$bmi_c <-  ifelse(total$bmi < 18.5, "Underweight",
+                 ifelse(total$bmi >= 18.5 & total$bmi < 25, "Healthy weight",
+                 ifelse(total$bmi >= 25 & total$bmi < 30, "Overweight",
+                 ifelse(total$bmi >= 30 & total$bmi < 40, "Obese",                                             "Extremely obese"))))
+
+
+total$mv_group <-  ifelse(total$vent_hour == 0.000, "0",
+                 ifelse(total$vent_hour > 0 & total$vent_hour <= 12, "12",
+                 ifelse(total$vent_hour > 12 & total$vent_hour <= 24, "24",
+                 ifelse(total$vent_hour > 24 & total$vent_hour <= 48,"48",
+                 ifelse(total$vent_hour > 48 & total$vent_hour <= 168, "168",">168")))))
+
+total$los_icu_group <-  ifelse(total$los_icu_day <= 2, "2",
+                 ifelse(total$los_icu_day > 2 & total$los_icu_day <= 3, "3",
+                 ifelse(total$los_icu_day > 3 & total$los_icu_day <= 7, "7",
+                 ifelse(total$los_icu_day > 7 & total$los_icu_day <= 14, "14",">14"))))
+
+total$los_hospital_group <-  ifelse(total$los_hospital_day <= 3, "3",
+                 ifelse(total$los_hospital_day > 3 & total$los_hospital_day <= 7, "7",
+                 ifelse(total$los_hospital_day > 7 & total$los_hospital_day <= 14, "14",
+                 ifelse(total$los_hospital_day > 14 & total$los_hospital_day <= 30, "30", 
+                        ">30"))))
+```
+
+```{r}
+# Reorder levels of age_group variable
+#total$age_group <- factor(total$age_group, levels = c("18-45", "45-65", "65-75",">75"))
+
+# Reorder levels of mv_group variable
+total$mv_group <- factor(total$mv_group, levels = c("0", "12", "24", "48","168",">168"))
+
+# Reorder levels of los_icu_group variable
+total$los_icu_group <- factor(total$los_icu_group, levels = c("2", "3", "7", "14", ">14"))
+
+# Reorder levels of los_hospital_group variable
+total$los_hospital_group <- factor(total$los_hospital_group, levels = c("3", "7", "14", "30", ">30"))
+
+total$bmi_c <- factor(total$bmi_c, levels = c("Underweight", "Healthy weight", "Overweight", "Obese", "Extremely obese"))
+```
+
+## Table One
+
+```{r}
+table1 <- CreateTableOne(vars = c('age',"bmi_c",
+                                  'admission_type','charlson_comorbidity_index', 'sofa',
+                                  'cabg','valve_surgery', 'mv_group',
+                                  'los_icu_group', 'los_hospital_group'),
+                         data = total,
+                         factorVars = c('admission_type', 'cabg',"bmi_c",
+                                        'valve_surgery', 'mv_group', 'los_icu_group',
+                                        'los_hospital_group'),
+                         strata = 'combined',
+                         smd = TRUE)
+
+table1 <- print(table1, smd=TRUE, showAllLevels = TRUE, noSpaces = TRUE, 
+                printToggle = FALSE, nonnormal = c("charlson_comorbidity_index", 'sofa','age'))
+
+write.csv(table1, file = "~/Desktop/301/PPC/output/table1_4subgroup.csv")
+```
+
+
+#total
+```{r}
+table1 <- CreateTableOne(vars = c('age',"bmi_c",
+                                  'admission_type','charlson_comorbidity_index', 'sofa',
+                                  'cabg','valve_surgery', 'mv_group',
+                                  'los_icu_group', 'los_hospital_group'),
+                         data = total,
+                         factorVars = c('admission_type', 'cabg',"bmi_c",
+                                        'valve_surgery', 'mv_group', 'los_icu_group',
+                                        'los_hospital_group'),
+                         smd = TRUE)
+
+table1 <- print(table1, smd=TRUE, showAllLevels = TRUE, noSpaces = TRUE, 
+                printToggle = FALSE, nonnormal = c("charlson_comorbidity_index", 'sofa','age'))
+
+write.csv(table1, file = "~/Desktop/301/PPC/output/table1_total.csv")
+```
+
+
+## ZHIHUIJINGHUA
+
+### MV
+
+add_stars <- function(p_values, threshold = 0.05) {
+  if (p_values < threshold) {
+    return(paste0(format(p_values, scientific = FALSE), "***"))
+  } else {
+    return(format(p_values, scientific = FALSE))
+  }
+}
+
+# Add stars to p-values less than threshold using mutate()
+p_values_filtered <- p_values_filtered %>% mutate(starred_p_value = sapply(p_values, add_stars, threshold = 0.05))
+
+ggplot(combined_data, aes(x = factor(mv, level=c('0 hour', '12 hour', '24 hour', '48 hour')) , y = (1-predicted), group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = (1-upper_ci), ymax = (1-lower_ci)), width = 0.1) +
+  geom_line(size = 0.8) +
+  labs(x = "MV Hour", y = "MV Removal Rate") +
+  scale_color_discrete(name = "Combined") + 
+  scale_color_manual(values = my_palette) +
+  theme_minimal() +
+  guides(color = guide_legend(title = "")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "right" ) +
+  geom_text(data = p_values_filtered, aes(x = factor(mv, level=c('0 hour', '12 hour', '24 hour', '48 hour')), y = max(p_values_filtered$predicted)+spacing *(1:nrow(p_values_filtered)), group = mv,label = paste(p_values_filtered$starred_p_value)), size = 3) +
+ coord_cartesian(ylim = c(0, 1.5), expand = TRUE)  # Adjust the y-axis limits to include p-values
+ 
+### ICU day
+
+
+p_values_filtered <- p_values_filtered %>% 
+  mutate(p_values = round(p_values, digits = 8))
+# Function to add stars to p-values less than a threshold
+add_stars <- function(p_values, threshold = 0.05) {
+  if (p_values < threshold) {
+    return(paste0(format(p_values, scientific = FALSE), "***"))
+  } else {
+    return(format(p_values, scientific = FALSE))
+  }
+}
+# Add stars to p-values less than threshold using mutate()
+p_values_filtered <- p_values_filtered %>% mutate(starred_p_value = sapply(p_values, add_stars, threshold = 0.05))
+
+
+ggplot(combined_data2, aes(x = factor(icu, level=c('2 day', '3 day', '7 day', '14 day')) , y = (1-predicted), group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = (1-upper_ci), ymax = (1-lower_ci)), width = 0.1) +
+  geom_line(size = 0.8) +
+  labs(x = "ICU Days", y = "ICU Leaving Rate") +
+  scale_color_discrete(name = "Combined") + 
+  scale_color_manual(values = my_palette) +
+  theme_minimal() +
+  guides(color = guide_legend(title = "")) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "right") +
+  geom_text(data = p_values_filtered, aes(x = factor(icu,, level=c('2 day', '3 day', '7 day', '14 day')), y = max(p_values_filtered$predicted)+spacing *(1:nrow(p_values_filtered)),label = paste(p_values_filtered$starred_p_value)), size = 3) +
+ coord_cartesian(ylim = c(0, 1.5), expand = TRUE)  
+ 
+ 
+## Hospital Days
+
+p_values_filtered <- p_values_filtered %>% 
+  mutate(p_values = round(p_values, digits = 8))
+# Function to add stars to p-values less than a threshold
+add_stars <- function(p_values, threshold = 0.05) {
+  if (p_values < threshold) {
+    return(paste0(format(p_values, scientific = FALSE), "***"))
+  } else {
+    return(format(p_values, scientific = FALSE))
+  }
+}
+combined_data3 <- bind_rows(hos3_table,hos7_table,hos14_table,hos30_table)
+p_values_filtered <- combined_data3[!is.na(combined_data3$p_values), ]
+# Add stars to p-values less than threshold using mutate()
+p_values_filtered <- p_values_filtered %>% mutate(starred_p_value = sapply(p_values, add_stars, threshold = 0.05))
+
+
+ggplot(combined_data3, aes(x = factor(hos, level=c('3 day', '7 day', '14 day', '30 day')) , y = (1-predicted), group = combined, color = combined)) +
+  geom_errorbar(aes(ymin = (1-upper_ci), ymax = (1-lower_ci)), width = 0.1) +
+  geom_line(size = 0.8) +
+  labs(x = "Hospital Days", y = "Hospital Leaving Rate") +
+  scale_color_discrete(name = "Combined") + 
+  scale_color_manual(values = my_palette) +
+  theme_minimal() +
+  guides(color = guide_legend(title = "")) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels
+    legend.position = "right") +
+  geom_text(data = p_values_filtered, aes(x = factor(hos, level=c('3 day', '7 day', '14 day', '30 day')), y = max(p_values_filtered$predicted)+spacing *(1:nrow(p_values_filtered)),label = paste(p_values_filtered$starred_p_value)), size = 3) +
+ coord_cartesian(ylim = c(0, 1.5), expand = TRUE)  
+
